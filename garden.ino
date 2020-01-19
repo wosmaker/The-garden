@@ -17,16 +17,66 @@
 
 WiFiManager wifiManager;
 BlynkTimer timer;
-bool isFirstConect = true;
+WidgetLED ledPump(V2), pumpUseTimer(V11);
+WidgetLED ledValve(V4), ValveUseTimer(V12);
 
-int8_t MaxHour = 1;
-int8_t Mode = 1; // 1 manual 2 auto
-bool isFirstPumpON = true;
-bool isTimeRun = false;
-unsigned long timeStart;
+bool isFirstConect = true;
+bool trick = false;
+
+bool _pumpON = false;
+bool _valveON = false;
+unsigned long time_pumpON = millis();
+unsigned long time_valveON = millis();
+
+typedef struct 
+{   
+    // 1 Sunday 2 Monday ...
+    bool weekSelect[8];
+    bool hasStartTime = false;
+    bool hasStopTime = false;
+
+    bool isTimerRun = false;
+    bool isFirstRun = true;
+
+    int8_t  startHour;
+    int8_t  startMinute;
+    int8_t  stopHour;
+    int8_t  stopMinute;
+
+    int8_t MaxHour = 1;
+    int8_t Mode = 2;
+
+    int TimeToUpdate = 3000; // default 3 second
+}INPUTVALVE;
+
+INPUTVALVE Vpump;
+INPUTVALVE Vvalve;
 
 void pinConfig(){
     pinMode(_pump,OUTPUT);
+    pinMode(_valve,OUTPUT);
+}
+
+void PumpOutPUT(){
+    if (digitalRead(_pump) != _pumpON) time_pumpON = millis();
+    else if (millis() - time_pumpON > Vpump.TimeToUpdate){
+        digitalWrite(_pump, !_pumpON);
+        if (!digitalRead(_pump)) ledPump.on();
+        else ledPump.off();
+
+        Blynk.virtualWrite(V1, !digitalRead(_pump));
+    }
+}
+
+void ValveOUTPUT(){
+    if (digitalRead(_valve) != _valveON) time_valveON = millis();
+    else if (millis() - time_valveON > Vvalve.TimeToUpdate) {
+        digitalWrite(_valve, !_valveON);
+        if (!digitalRead(_valve)) ledValve.on();
+        else ledValve.off();
+       
+        Blynk.virtualWrite(V3, !digitalRead(_valve));
+    }
 }
 
 void setup()
@@ -55,6 +105,7 @@ void setup()
 
     fetchAndSync();
 }
+
 void fetchAndSync(){
     char url[100] = "http://worldtimeapi.org/api/timezone/Asia/Bangkok";
     HTTPClient http;
@@ -78,153 +129,261 @@ void fetchAndSync(){
         setTime((hour(t)+7)%24,minute(t),second(t),day(t),month(t),year(t));
         Serial.print("now after Sync : ");
         Serial.println((long)now());
-        Serial.print("DayofWeek :");
-        Serial.println((int)weekday(now()));
     }
+    trick = true;
 }
 
 void loop()
 {
     Blynk.run();
-    everyMinute();
-    state();
+    runEveryMinute();
+    PumpOutPUT();
+    ValveOUTPUT();
 }
 
 BLYNK_CONNECTED(){
     if(isFirstConect){
-        Blynk.syncAll();
         isFirstConect = false;
+        // for pump default config
+        Blynk.virtualWrite(V9,2);
+        Blynk.virtualWrite(V1, !digitalRead(_pump));
+
+        if (!digitalRead(_pump)) ledPump.on();
+        else ledPump.off();
+
+        // for valve default config
+        Blynk.virtualWrite(V10,2);
+        Blynk.virtualWrite(V3, !digitalRead(_valve));
+
+        if (!digitalRead(_valve)) ledValve.on();
+        else ledValve.off();
+
+        Blynk.syncAll();
     }
 }
 
-void pumpControl(int in){
-    digitalWrite(_pump,in);
-    Blynk.virtualWrite(V1,digitalRead(_pump));
-    Blynk.virtualWrite(V2,digitalRead(_pump));
-    if(in)
-        Serial.println("Start PUMP");
-    else
-        Serial.println("Stop pump");
+// Set time to update for pump control
+BLYNK_WRITE(V13){
+    Vpump.TimeToUpdate = param.asInt() * 1000;
 }
 
+// Set time to update for valve control
+BLYNK_WRITE(V14){
+    Vvalve.TimeToUpdate = param.asInt() * 1000;
+}
+
+// Blynk button for control pump
 BLYNK_WRITE(V1){
+    trick = true;
     int pv = param.asInt();
-    pumpControl(pv);
-    if (Mode == 2 && isTimeRun){
+    _pumpON = pv == 1 ? true : false;
+    Blynk.syncVirtual(V2);
+    if (Vpump.Mode == 2 && Vpump.isTimerRun){
         Blynk.virtualWrite(V9,1);
+        Blynk.syncVirtual(V9);
     }
 }
 
-BLYNK_READ(V2){
-    Blynk.virtualWrite(V2,digitalRead(_pump));
-}
-
+// Blynk button for contorl valve
 BLYNK_WRITE(V3){
+    trick = true;
     int pv = param.asInt();
-    digitalWrite(_valve, pv);
-    Blynk.virtualWrite(V4,digitalRead(_valve));
+    _valveON = pv == 1 ? true : false;
+    Blynk.syncVirtual(V4);
+    if (Vvalve.Mode == 2 && Vvalve.isTimerRun){
+        Blynk.virtualWrite(V10,1);
+        Blynk.syncVirtual(V10);
+    }
 }
 
-BLYNK_READ(V4){
-    Blynk.virtualWrite(V4,digitalRead(_valve));
-}
-
-typedef struct 
-{   
-    // 1 Sunday 2 Monday ...
-    bool weekSelect[8];
-    bool hasStartTime;
-    bool hasStopTime;
-    int  startHour;
-    int  startMinute;
-    
-    int  stopHour;
-    int  stopMinute;
-}TimeINPUT;
-
-TimeINPUT btime;
-
+// Pump time setup
 BLYNK_WRITE(V5){    
-    Serial.println("Setup time");
+    trick = true;
+    Serial.println("Pump time setup");
     TimeInputParam t(param);
-    btime.hasStartTime  = t.hasStartTime();
-    btime.hasStopTime   = t.hasStopTime();
-    btime.startHour     = t.getStartHour();
-    btime.startMinute   = t.getStartMinute();
-    btime.stopHour      = t.getStopHour();
-    btime.stopMinute    = t.getStopMinute();
+    Vpump.hasStartTime  = t.hasStartTime();
+    Vpump.hasStopTime   = t.hasStopTime();
+    Vpump.startHour     = t.getStartHour();
+    Vpump.startMinute   = t.getStartMinute();
+    Vpump.stopHour      = t.getStopHour();
+    Vpump.stopMinute    = t.getStopMinute();
 
     for(int i = 1;i < 8;i++){
-        btime.weekSelect[i] = t.isWeekdaySelected((i+5)%7+1);
-        Serial.printf("i %d : %d\n",i,t.isWeekdaySelected((i+5)%7+1));
+        Vpump.weekSelect[i] = t.isWeekdaySelected((i+5)%7+1);
     }
-    timeCheck();
 }
 
+// Valve time Setup
+BLYNK_WRITE(V6){
+    trick = true;
+    Serial.println("Valve time setup");
+    TimeInputParam t(param);
+    Vvalve.hasStartTime  = t.hasStartTime();
+    Vvalve.hasStopTime   = t.hasStopTime();
+    Vvalve.startHour     = t.getStartHour();
+    Vvalve.startMinute   = t.getStartMinute();
+    Vvalve.stopHour      = t.getStopHour();
+    Vvalve.stopMinute    = t.getStopMinute();
+
+    for(int i = 1;i < 8;i++){
+        Vvalve.weekSelect[i] = t.isWeekdaySelected((i+5)%7+1);
+    }
+}
+
+// Pump setup Max Hour
 BLYNK_WRITE(V7){
-    MaxHour = param.asInt();
-    Serial.print("Max hour : ");
-    Serial.println(MaxHour);
+    Vpump.MaxHour = param.asInt();
+    Serial.print("Pump Max hour : ");
+    Serial.println(Vpump.MaxHour);
 }
 
+// Valve setup Max Hour
+BLYNK_WRITE(V8){
+    Vvalve.MaxHour = param.asInt();
+    Serial.print("Valve Max hour : ");
+    Serial.println(Vvalve.MaxHour);
+}
+
+// Pump setup Mode
 BLYNK_WRITE(V9){
-    int pv = param.asInt();
-    Mode = pv;
-    timeCheck();
+    trick = true;
+    Vpump.Mode  = param.asInt();
+    Serial.print("pump Mode : ");
+    Serial.println(Vpump.Mode);
 }
 
-BLYNK_READ(V10){
-    Blynk.virtualWrite(V10,Mode);
+// Valve setup Mode
+BLYNK_WRITE(V10){
+    trick = true;
+    Vvalve.Mode = param.asInt();
+    Serial.println("valve Mode : ");
+    Serial.println(Vvalve.Mode);
 }
 
-void timeCheck(){
-    Serial.println("Check timer");
-    if(btime.weekSelect[weekday(now())] && Mode == 2){
-        if(btime.hasStartTime){
-            if(hour(now()) >= btime.startHour ){
-                if(minute(now()) >= btime.startMinute){
-                    Serial.println("time start ");
-                    isTimeRun = true;
-                    pumpControl(1);
-                }
+unsigned long pumpStartAt;
+void pumpRun(){
+    Serial.println("Pump Run");
+    if (Vpump.Mode == 2 ){
+        if (Vpump.weekSelect[weekday(now())] && Vpump.hasStartTime && Vpump.hasStopTime){
+            Serial.println("Time check");
+            time_t t = now();
+            int HMtime = hour(t) * 100 + minute(t);
+            int StartTime = Vpump.startHour * 100 + Vpump.startMinute;
+            int StopTime = Vpump.stopHour * 100 + Vpump.stopMinute;
+    
+            Serial.printf("Start Time :: %d || Stop Time :: %d >> Now Time :: %d\n", StartTime, StopTime, HMtime);
+            if ( HMtime >= StartTime && HMtime <= StopTime && StartTime < StopTime){
+                if(!_pumpON) Serial.println("Pump Start with Timer");
+                Vpump.isTimerRun = true;
+                _pumpON = true;
+            }
+            else if(Vpump.isTimerRun) {
+                if(_pumpON) Serial.println("Pump Stop By Timer");
+                Vpump.isTimerRun = false;
+                _pumpON = false;
             }
         }
-
-        if(btime.hasStopTime){
-            if(hour(now()) >= btime.stopHour){
-                if(minute(now()) >= btime.stopMinute){
-                    isTimeRun = false;
-                    pumpControl(0);
-                }
-            }
+        else if(Vpump.isTimerRun) {
+            if(_pumpON) Serial.println("Pump Stop By DAY Change");
+            Vpump.isTimerRun = false;
+            _pumpON = false;
         }
     }
+
+    // state
+    if (Vpump.Mode == 1){
+        if (Vpump.isTimerRun) 
+            _pumpON = false;
+        Vpump.isTimerRun = false;
+    }
+    
+    if (!_pumpON){
+        Vpump.isFirstRun = true;
+    }
+
+    if ((Vpump.isFirstRun && _pumpON) || Vpump.isTimerRun){
+        Vpump.isFirstRun = false;
+        pumpStartAt = millis();
+    }
+
+    if (!Vpump.isTimerRun && _pumpON && millis() - pumpStartAt > Vpump.MaxHour *60*60*1000){
+        _pumpON = false;
+    }
+
+    // use timer led
+    if (_pumpON && Vpump.isTimerRun) pumpUseTimer.on();
+    else pumpUseTimer.off();
 }
 
-int lastMinute = 60;
-void everyMinute(){
-    if(lastMinute != minute(now())){
+unsigned long valveStartAt;
+void valveRun(){
+    Serial.println("Valve Run");
+    if (Vvalve.Mode == 2 ){
+        if (Vvalve.weekSelect[weekday(now())] && Vvalve.hasStartTime && Vvalve.hasStopTime){
+            Serial.println("Time check");
+            time_t t = now();
+            int HMtime = hour(t) * 100 + minute(t);
+            int StartTime = Vvalve.startHour * 100 + Vvalve.startMinute;
+            int StopTime = Vvalve.stopHour * 100 + Vvalve.stopMinute;
+    
+            Serial.printf("Start Time :: %d || Stop Time :: %d >> Now Time :: %d\n", StartTime, StopTime, HMtime);
+            if ( HMtime >= StartTime && HMtime <= StopTime && StartTime < StopTime){
+                if(!_valveON) Serial.println("Pump Start with Timer");
+                Vvalve.isTimerRun = true;
+                _valveON = true;
+            }
+            else if(Vvalve.isTimerRun) {
+                if(_valveON) Serial.println("Pump Stop By Timer");
+                Vvalve.isTimerRun = false;
+                _valveON = false;
+            }
+        }
+        else if(Vvalve.isTimerRun) {
+            if(_valveON) Serial.println("Pump Stop By DAY Change");
+            Vvalve.isTimerRun = false;
+            _valveON = false;
+        }
+    }
+
+    // state
+    if (Vvalve.Mode == 1){
+        if (Vvalve.isTimerRun) 
+            _valveON = false;
+        Vvalve.isTimerRun = false;
+    }
+    
+    if (!_valveON){
+        Vvalve.isFirstRun = true;
+    }
+
+    if ((Vvalve.isFirstRun && _valveON) || Vvalve.isTimerRun){
+        Vvalve.isFirstRun = false;
+        valveStartAt = millis();
+    }
+
+    if (!Vvalve.isTimerRun && _valveON && millis() - valveStartAt > Vvalve.MaxHour *60*60*1000){
+        _valveON = false;
+    }
+
+    // use timer led
+    if (_valveON && Vvalve.isTimerRun) ValveUseTimer.on();
+    else ValveUseTimer.off();
+}
+
+int8_t lastMinute = 60;
+void runEveryMinute(){
+    if(lastMinute != minute(now()) || trick){
+        trick = false;
+        pumpRun();
+        valveRun();
+
         lastMinute = minute(now());
         Serial.print("minute : ");
         Serial.println(minute(now()));
-        timeCheck();
+        Serial.print("pumpStatus :: ");
+        Serial.println(_pumpON);
+        Serial.print("valveStatus :: ");
+        Serial.println(_valveON);
     }
 }
-void state(){
-    if (digitalRead(_pump) && isFirstPumpON){
-        isFirstPumpON = false;
-        timeStart = millis();
-    }
-    else if (!digitalRead(_pump)){
-        isFirstPumpON = true;
-        timeStart = millis();
-    }
 
-    if (digitalRead(_pump) && millis() - timeStart > 1000*60*60 * MaxHour){
-        Blynk.virtualWrite(V1,0);
-        pumpControl(0);
-        if (Mode == 2){
-            isTimeRun = false;
-        }
-    }
-}
